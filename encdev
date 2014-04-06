@@ -1,0 +1,195 @@
+#!/usr/bin/perl -w
+use strict;
+use Net::DBus;
+use YAML;
+
+my $conf = YAML::LoadFile("$ENV{HOME}/.encdev");
+my $bus = Net::DBus->system;
+my $service = $bus->get_service('org.freedesktop.UDisks2');
+my $devices;
+
+sub exit_error {
+    print STDERR "Error: $_[0]\n";
+    exit (exists $_[1] ? $_[1] : 1);
+}
+
+sub get_device {
+    my ($dev, $mo) = @_;
+    foreach my $d (keys %$mo) {
+        my $block = $mo->{$d}{'org.freedesktop.UDisks2.Block'};
+        if (defined $block->{IdUUID} && $block->{IdUUID} eq  $dev->{uuid}) {
+            $dev->{block} = $d;
+            last;
+        }
+    }
+    return unless $dev->{block};
+    foreach my $d (keys %$mo) {
+        my $block = $mo->{$d}{'org.freedesktop.UDisks2.Block'};
+        if (defined $block->{CryptoBackingDevice}
+            && $block->{CryptoBackingDevice} eq  $dev->{block}) {
+            $dev->{unlocked} = $d;
+            my $fs = $mo->{$d}{'org.freedesktop.UDisks2.Filesystem'};
+            $dev->{mounted} = defined $fs->{MountPoints} ? $fs->{MountPoints} : [];
+            last;
+        }
+    }
+    return unless $dev->{unlocked};
+}
+
+sub get_devices {
+    my $obj = $service->get_object('/org/freedesktop/UDisks2');
+    my $mo = $obj->GetManagedObjects;
+    $devices = $conf->{devices};
+    foreach my $devname (keys %$devices) {
+        get_device($devices->{$devname}, $mo);
+    }
+}
+
+sub print_status {
+    my %p;
+    foreach my $devname (keys %$devices) {
+        my $d = $devices->{$devname};
+        next unless $d->{block};
+        if (defined $d->{mounted} && @{$d->{mounted}}) {
+            $p{$devname} = 'mounted';
+            next;
+        }
+        $p{$devname} = $d->{unlocked} ? 'unlocked' : 'locked';
+    }
+    foreach my $dev (sort keys %p) {
+        print "$dev: $p{$dev}\n";
+    }
+}
+
+sub known_device {
+    my ($act, $dev) = @_;
+    exit_usage($act, 1) unless $dev;
+    exit_error "Unknown device $dev" unless $devices->{$dev};
+    return ($dev, $devices->{$dev});
+}
+
+sub unlock {
+    my ($dev, $d) = known_device(@_);
+    exit_error "$dev is already unlocked" if $d->{unlocked};
+    exit_error "$dev is not present" unless $d->{block};
+    my $obj = $service->get_object($d->{block});
+    my $r = $obj->Unlock($d->{passwd}, {});
+    print "Unlocked $dev\n";
+}
+
+sub mount {
+    my ($dev, $d) = known_device(@_);
+    if (defined $d->{mounted} && @{$d->{mounted}}) {
+        exit_error "$dev is already mounted";
+    }
+    if (!$d->{unlocked}) {
+        unlock('mount', $dev) unless $d->{unlocked};
+        get_devices;
+    }
+    exit_error "Could not unlock $dev" unless $d->{unlocked};
+    my $obj = $service->get_object($d->{unlocked});
+    my $r = $obj->Mount({});
+    exit_error "Could not mount $dev" unless $r;
+    print "Mounted $dev\n";
+}
+
+sub lock {
+    my ($dev, $d) = known_device(@_);
+    exit_error "$dev is already locked" unless $d->{unlocked};
+    exit_error "$dev is not present" unless $d->{block};
+    if (defined $d->{mounted} && @{$d->{mounted}}) {
+        unmount('lock', $dev);
+    }
+    my $obj = $service->get_object($d->{block});
+    my $r = $obj->Lock({});
+    print "Locked $dev\n";
+}
+
+sub unmount {
+    my ($dev, $d) = known_device(@_);
+    if (!defined $d->{mounted} || !@{$d->{mounted}}) {
+        exit_error "$dev is not mounted";
+    }
+    my $obj = $service->get_object($d->{unlocked});
+    my $r = $obj->Unmount({});
+    exit_error $r if $r;
+    print "Unmounted $dev\n";
+}
+
+sub exit_usage {
+    usage('usage', $_[0]);
+    exit $_[1];
+}
+
+my %actions = (
+    status  => {
+        f => \&print_status,
+        usage => <<END,
+Show status about known devices
+
+usage: encdev status
+END
+    },
+    unmount => {
+        f => \&unmount,
+        usage => <<END,
+Unmount a device
+
+usage: encdev unmount <device>
+
+You usually also want to lock the device after unmounting it, so you
+should rather use the lock action which does both.
+END
+    },
+    mount   => {
+        f => \&mount,
+        usage => <<END,
+Unlock and mount a device
+
+usage: encdev mount <device>
+END
+    },
+    lock    => {
+        f => \&lock,
+        usage => <<END,
+Unmount and lock a device
+
+usage: encdev lock <device>
+END
+    },
+    unlock  => {
+        f => \&unlock,
+        usage => <<END,
+Unlock a device
+
+usage: encdev unlock <device>
+END
+    },
+    usage   => {
+        f => \&usage,
+        usage => <<END,
+Show usage informations
+
+usage: encdev usage [action]
+END
+    },
+);
+
+sub usage {
+    if ($_[1] && $actions{$_[1]}) {
+        print STDERR $actions{$_[1]}->{usage};
+    } else {
+        my $usage = <<END;
+usage: encdev <action> [options]
+
+Available actions:
+END
+        print STDERR $usage;
+        print STDERR "  ", join("\n  ", sort keys %actions), "\n";
+    }
+}
+
+exit_usage(undef, 1) unless @ARGV;
+exit_error "Unknown action $ARGV[0]" unless $actions{$ARGV[0]};
+get_devices;
+$actions{$ARGV[0]}->{f}(@ARGV);
