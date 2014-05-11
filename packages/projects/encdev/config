@@ -1,0 +1,11 @@
+version: '[% c("describe/tag") %]'
+git_url: 'file://[% c("basedir") %]/..'
+git_hash: master
+compress_tar: xz
+commit_gpg_id: 1
+summary: mount and unmount encrypted devices
+description: |
+  encdev is a small command line tool to mount and unmount encrypted
+  devices, without typing their passwords, using udisks through dbus.
+url: https://github.com/boklm/encdev
+gpg_keyring: boklm.gpg
