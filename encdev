@@ -17,7 +17,8 @@ sub get_device {
     my ($dev, $mo) = @_;
     foreach my $d (keys %$mo) {
         my $block = $mo->{$d}{'org.freedesktop.UDisks2.Block'};
-        if (defined $block->{IdUUID} && $block->{IdUUID} eq  $dev->{uuid}) {
+        if (defined $block->{IdUUID} && defined $dev->{uuid}
+            && $block->{IdUUID} eq $dev->{uuid}) {
             $dev->{block} = $d;
             last;
         }
